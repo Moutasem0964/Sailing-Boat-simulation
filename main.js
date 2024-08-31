@@ -1,175 +1,180 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { Water } from 'three/addons/objects/Water.js';
 import { Sky } from 'three/addons/objects/Sky.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import * as dat from 'dat.gui';
 
-let camera, scene, renderer, controls, water, sun, boat;
-const clock = new THREE.Clock();
+let camera, scene, renderer, controls, water;
+const loader = new GLTFLoader();
+const g = 9.8; 
 
-const GRAVITY_ACCELERATION = 9.81; // تسارع الجاذبية
-let windDirection = new THREE.Vector3(1, 0, 0); // اتجاه الرياح الافتراضي
-let sailAngle = Math.PI / 2; // زاوية الشراع الافتراضية (90 درجة)
-
-class Forces {
-    constructor(mass, volumeDisplaced, fluidDensity, dragCoefficient = 0.1, windForce = new THREE.Vector3(0, 0, 0)) {
-        this.mass = mass;
-        this.volumeDisplaced = volumeDisplaced; // الحجم المزاح
-        this.fluidDensity = fluidDensity; // كثافة السائل
-        this.gravity = new THREE.Vector3(0, -GRAVITY_ACCELERATION * this.mass, 0); // قوة الجاذبية
-        this.buoyancy = this.computeBuoyancy(); // قوة الطفو
-        this.dragCoefficient = dragCoefficient; // معامل السحب
-        this.windForce = windForce; // قوة الرياح
-    }
-
-    computeBuoyancy() {
-        return new THREE.Vector3(0, this.fluidDensity * this.volumeDisplaced * GRAVITY_ACCELERATION, 0);
-    }
-
-    computeAirResistance(velocity) {
-        return velocity.clone().multiplyScalar(-this.dragCoefficient);
-    }
-
-    computeWaterResistance(velocity) {
-        return velocity.clone().multiplyScalar(-this.dragCoefficient * 2); // افتراض أن مقاومة الماء ضعف مقاومة الهواء
-    }
-
-    computeWindForce(windDirection, sailAngle) {
-        sailAngle = Math.max(0, Math.min(sailAngle, Math.PI / 2)); // ضبط الزاوية بين 0 و 90 درجة
-        const windEffectiveness = Math.abs(Math.sin(sailAngle)); // استخدام دالة الجيب لنطاق أفضل
-        return windDirection.clone().multiplyScalar(windEffectiveness);
-    }
-
-    computeNetForce(velocity, windDirection, sailAngle) {
-        const airResistance = this.computeAirResistance(velocity);
-        const waterResistance = this.computeWaterResistance(velocity);
-        const windForce = this.computeWindForce(windDirection, sailAngle);
-
-        const netForce = new THREE.Vector3();
-        netForce.add(this.gravity).add(this.buoyancy).add(windForce).add(airResistance).add(waterResistance);
-        return netForce;
-    }
-
-    computeAcceleration(netForce) {
-        return netForce.clone().divideScalar(this.mass);
-    }
-
-    isAtRest(velocity) {
-        const netForce = this.computeNetForce(velocity, windDirection, sailAngle);
-        return netForce.length() === 0 && velocity.length() === 0;
-    }
-}
-
-class Boat {
+class Boat 
+{
     constructor() {
-        this.mass = 500; // كتلة القارب
-        this.volumeDisplaced = 2; // الحجم المزاح
-        this.fluidDensity = 1000; // كثافة الماء (تقريبًا)
-        this.forces = new Forces(this.mass, this.volumeDisplaced, this.fluidDensity);
-        this.velocity = new THREE.Vector3(0, 0, 0);
-        this.acceleration = new THREE.Vector3(0, 0, 0);
+        this.mass = 3000;
+        this.volume = 1.5;
+        this.waterDensity = 1000;
+        this.inertia = (1 / 12) * this.mass * (Math.pow(2, 2) + Math.pow(2, 2));
+        this.angularVelocity = 0;
+        this.torque = 0;
+        this.thrust = 0;
         this.rotationSpeed = 0;
-        this.boat = null;
-        const loader = new GLTFLoader();
-        loader.load('assets/boat/board_hight/scene.gltf', (gltf) => {
-            scene.add(gltf.scene);
-            gltf.scene.scale.set(1, 1, 1);
-            
-            // تعديل وضع القارب ليكون جزء منه مغمور في الماء
-            const boatHeight = 2; // تعديل بناءً على ارتفاع القارب الفعلي
-            gltf.scene.position.set(0, -10, 0); // غمر نصف القارب
+        this.radius = 5; 
+        this.collided = false;
 
-            gltf.scene.rotation.y = Math.PI;
+        loader.load("assets/boat/board_hight/scene.gltf", (gltf) => {
             this.boat = gltf.scene;
-            console.log("Boat loaded and added to scene");
-
-            // التأكد من أن القارب يبدأ في حالة سكون
-            if (this.forces.isAtRest(this.velocity)) {
-                this.velocity.set(0, 0, 0);
-                console.log("Boat is at rest");
-            }
-        }, undefined, (error) => {
-            console.error("Error loading boat:", error);
+            this.boat.scale.set(0.2, 0.2, 0.2);
+            this.boat.position.set(-10, -4, -10);
+            this.velocity = new THREE.Vector3(0, 0, 0);
+            this.acceleration = new THREE.Vector3(0, 0, 0);
+            scene.add(this.boat);
         });
     }
 
-    update(deltaTime) {
-        if (this.boat) {
-            const netForce = this.forces.computeNetForce(this.velocity, windDirection, sailAngle);
-            this.acceleration = this.forces.computeAcceleration(netForce);
-
-            if (!this.forces.isAtRest(this.velocity)) {
-                this.velocity.add(this.acceleration.clone().multiplyScalar(deltaTime));
-            }
-
-            // حساب القوة الناتجة
-            const resultantForce = netForce.clone();
-
-            // تحديث موقع القارب والدوران
-            const direction = new THREE.Vector3();
-            this.boat.getWorldDirection(direction);
-            direction.multiplyScalar(this.velocity.length() * deltaTime);
-            this.boat.position.add(direction);
-            this.boat.rotation.y += this.rotationSpeed * deltaTime;
+    checkCollision(otherObject) {
+        const distance = this.boat.position.distanceTo(otherObject.object.position);
+        const collisionDistance = this.radius+50 + otherObject.radius;
+        if (distance < collisionDistance) {
+            this.collided = true;
+            this.handleCollision(otherObject);
+        } else {
+            this.collided = false;
         }
     }
 
-    setVelocity(speed) {
-        this.velocity.set(0, 0, speed);
+    handleCollision(otherObject) {
+        const normal = new THREE.Vector3().subVectors(this.boat.position, otherObject.object.position).normalize();
+        const relativeVelocity = new THREE.Vector3().subVectors(this.velocity, otherObject.velocity);
+
+        const velocityAlongNormal = relativeVelocity.dot(normal);
+
+        if (velocityAlongNormal > 0) return;
+
+        const restitution = 0.7; 
+
+        const impulseScalar = -(1 + restitution) * velocityAlongNormal / (1 / this.mass + 1 / otherObject.mass);
+        const impulse = normal.multiplyScalar(impulseScalar);
+
+        this.velocity.add(impulse.divideScalar(this.mass));
+        otherObject.velocity.sub(impulse.divideScalar(otherObject.mass));
     }
 
-    setRotationSpeed(speed) {
-        this.rotationSpeed = speed;
+    update(deltaTime) {
+        if (!this.boat) return;
+
+        const gravityForce = new THREE.Vector3(0, -this.mass * g, 0);
+        const submergedVolume = Math.max(0, this.volume * (1 - this.boat.position.y / 2));
+        const buoyancyForce = new THREE.Vector3(0, this.waterDensity * submergedVolume * g, 0);
+        const dragCoefficient = 0.1;
+        const dragForce = this.velocity.clone().multiplyScalar(-dragCoefficient * this.velocity.length());
+        const thrustForce = new THREE.Vector3(0, 0, this.thrust).applyQuaternion(this.boat.quaternion);
+        const totalForce = new THREE.Vector3().add(gravityForce).add(buoyancyForce).add(dragForce).add(thrustForce);
+
+        this.acceleration.copy(totalForce).divideScalar(this.mass);
+        this.velocity.add(this.acceleration.clone().multiplyScalar(deltaTime));
+
+        const linearDamping = 0.98;
+        if (this.thrust === 0) {
+            this.velocity.multiplyScalar(linearDamping);
+        }
+
+        this.boat.position.add(this.velocity.clone().multiplyScalar(deltaTime));
+
+        if (this.boat.position.y < -4) {
+            this.boat.position.y = -4;
+            this.velocity.y = 0;
+        }
+
+        const armLength = 1;
+        this.torque = this.thrust * armLength * Math.sin(this.rotationSpeed);
+        const angularAcceleration = this.torque / this.inertia;
+
+        this.angularVelocity += angularAcceleration * deltaTime;
+        const angularDampingFactor = 0.95;
+        this.angularVelocity *= angularDampingFactor;
+
+        this.boat.rotation.y += this.angularVelocity * deltaTime;
+
+        const coordinatesElement = document.getElementById('coordinates');
+        if (coordinatesElement) {
+            const { x, y, z } = this.boat.position;
+            coordinatesElement.textContent = `Coordinates: (x: ${x.toFixed(2)}, y: ${y.toFixed(2)}, z: ${z.toFixed(2)})`;
+        }
+        const accelerationElement = document.getElementById('acceleration');
+        if (accelerationElement) {
+            const { x, y, z } = this.acceleration;
+            accelerationElement.textContent = `acceleration: (x: ${x.toFixed(2)}, y: ${y.toFixed(2)}, z: ${z.toFixed(2)})`;
+        }
+        const velocityElement = document.getElementById('velocity');
+        if (velocityElement) {
+            const { x, y, z } = this.velocity;
+            velocityElement.textContent = `velocity: (x: ${x.toFixed(2)}, y: ${y.toFixed(2)}, z: ${z.toFixed(2)})`;
+        }
+    }
+
+    setVolume(newVolume) {
+        this.volume = newVolume;
+        this.boat.scale.set(newVolume, newVolume, newVolume);
+    }
+
+    setMass(newMass) {
+        this.mass = newMass;
+        this.inertia = (1 / 12) * this.mass * (Math.pow(2, 2) + Math.pow(2, 2));
     }
 }
 
-function init() {
-    // إعداد المشهد والكاميرا
-    scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 20000);
-    camera.position.set(-100, 50, 200);
-
-    // إعداد المصير
-    renderer = new THREE.WebGLRenderer();
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    document.body.appendChild(renderer.domElement);
-
-    // إعداد الشمس والسماء
-    sun = new THREE.Vector3();
-    const sky = new Sky();
-    sky.scale.setScalar(10000);
-    scene.add(sky);
-
-    const skyUniforms = sky.material.uniforms;
-    skyUniforms['turbidity'].value = 10;
-    skyUniforms['rayleigh'].value = 2;
-    skyUniforms['mieCoefficient'].value = 0.005;
-    skyUniforms['mieDirectionalG'].value = 0.8;
-
-    const parameters = {
-        elevation: 2,
-        azimuth: 180
-    };
-
-    function updateSun() {
-        const phi = THREE.MathUtils.degToRad(90 - parameters.elevation);
-        const theta = THREE.MathUtils.degToRad(parameters.azimuth);
-
-        sun.setFromSphericalCoords(1, phi, theta);
-        sky.material.uniforms['sunPosition'].value.copy(sun);
+class Sphere {
+    constructor(position, radius, mass) {
+        this.radius = radius;
+        this.mass = mass;
+        this.velocity = new THREE.Vector3(0, 0, 0);
+        this.acceleration = new THREE.Vector3(0, 0, 0);
+        this.object = new THREE.Mesh(
+            new THREE.SphereGeometry(radius, 32, 32),
+            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        this.object.position.copy(position);
+        scene.add(this.object);
     }
 
-    updateSun();
+    update(deltaTime) {
+        this.velocity.add(this.acceleration.clone().multiplyScalar(deltaTime));
+        this.object.position.add(this.velocity.clone().multiplyScalar(deltaTime));
 
-    // إعداد الماء
+        this.acceleration.set(0, 0, 0);
+    }
+}
+
+const boat = new Boat();
+
+function init() {
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.8;
+    document.body.appendChild(renderer.domElement);
+
+    scene = new THREE.Scene();
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 3000);
+    camera.position.set(-40, 30, 100);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(50, 50, 50);
+    scene.add(directionalLight);
+
     const waterGeometry = new THREE.PlaneGeometry(10000, 10000);
     water = new Water(waterGeometry, {
         textureWidth: 512,
         textureHeight: 512,
-        waterNormals: new THREE.TextureLoader().load('assets/see.jpg', function(texture) {
+        waterNormals: new THREE.TextureLoader().load('assets/see.jpg', function (texture) {
             texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-            console.log("Water texture loaded");
         }),
         sunDirection: new THREE.Vector3(),
         sunColor: 0xffffff,
@@ -178,109 +183,81 @@ function init() {
         fog: scene.fog !== undefined
     });
     water.rotation.x = -Math.PI / 2;
-    water.position.y = 0; // تحديد مستوى الماء عند y = 0
     scene.add(water);
 
-    // إعداد الإضاءة
-    const ambientLight = new THREE.AmbientLight(0x404040);
-    scene.add(ambientLight);
+    const sky = new Sky();
+    sky.scale.setScalar(2000);
+    scene.add(sky);
 
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(0, 100, 100).normalize();
-    scene.add(directionalLight);
+    const skyUniforms = sky.material.uniforms;
+    skyUniforms['turbidity'].value = 10;
+    skyUniforms['rayleigh'].value = 2;
+    skyUniforms['mieCoefficient'].value = 0.005;
+    skyUniforms['mieDirectionalG'].value = 0.8;
 
-    // إعداد التحكم
+    const sunPosition = new THREE.Vector3();
+    sunPosition.setFromSphericalCoords(1, Math.PI / 2, Math.PI / 4);
+    sky.material.uniforms['sunPosition'].value.copy(sunPosition);
+
     controls = new OrbitControls(camera, renderer.domElement);
-    controls.maxPolarAngle = Math.PI * 0.495;
-    controls.target.set(0, 10, 0);
-    controls.minDistance = 40.0;
-    controls.maxDistance = 200.0;
     controls.update();
 
-    window.addEventListener('resize', onWindowResize);
+    const gui = new dat.GUI();
+    const boatSettings = {
+        thrust: 50.0,
+        rotationSpeed: 0.05,
+        mass: boat.mass,
+        volume: boat.volume
+    };
 
-    console.log("Scene and camera initialized");
+    gui.add(boatSettings, 'thrust', 0, 500).name('Thrust').onChange((value) => {
+        boat.thrust = value;
+    });
+    gui.add(boatSettings, 'rotationSpeed', -0.5, 0.5).name('Rotation Speed').onChange((value) => {
+        boat.rotationSpeed = value;
+    });
+    gui.add(boatSettings, 'mass', 500, 5000).name('Mass').onChange((value) => {
+        boat.setMass(value);
+    });
+    gui.add(boatSettings, 'volume', 0.1, 5).name('Volume').onChange((value) => {
+        boat.setVolume(value);
+    });
 
-    // إنشاء القارب
-    boat = new Boat();
+    const sphere = new Sphere(new THREE.Vector3(0, 0, 100), 20, 500);
+     
+     const sphereCoordinatesElement = document.createElement('div');
+     sphereCoordinatesElement.id = 'sphere-coordinates';
+     sphereCoordinatesElement.style.position = 'absolute';
+     sphereCoordinatesElement.style.top = '300px'; 
+     sphereCoordinatesElement.style.left = '10px';
+     sphereCoordinatesElement.style.color = 'white';
+    
+     document.body.appendChild(sphereCoordinatesElement);
+ 
 
-    // مستمعي الأحداث للضغط على المفاتيح
-    document.addEventListener('keydown', handleKeyDown);
-    document.addEventListener('keyup', handleKeyUp);
-}
 
-function handleKeyDown(event) {
-    switch (event.key) {
-        case 'w':
-            boat.setVelocity(100); // تحريك القارب للأمام
-            break;
-        case 's':
-            boat.setVelocity(-100); // تحريك القارب للخلف
-            break;
-        case 'a':
-            boat.setRotationSpeed(1); // تدوير القارب لليسار
-            break;
-        case 'd':
-            boat.setRotationSpeed(-1); // تدوير القارب لليمين
-            break;
-        case 'ArrowLeft':
-            windDirection.applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 18); // تدوير اتجاه الرياح لليسار
-            console.log('Wind direction after left arrow press:', windDirection); // تسجيل التفاصيل
-            break;
-        case 'ArrowRight':
-            windDirection.applyAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 18); // تدوير اتجاه الرياح لليمين
-            console.log('Wind direction after right arrow press:', windDirection); // تسجيل التفاصيل
-            break;
-        case 'ArrowUp':
-            sailAngle = Math.min(sailAngle + Math.PI / 18, Math.PI / 2); // زيادة زاوية الشراع إلى 90°
-            console.log('Sail angle increased:', sailAngle); // تسجيل التفاصيل
-            break;
-        case 'ArrowDown':
-            sailAngle = Math.max(sailAngle - Math.PI / 18, 0); // تقليل زاوية الشراع إلى 0°
-            console.log('Sail angle decreased:', sailAngle); // تسجيل التفاصيل
-            break;
-    }
-}
+    function animate() {
+        requestAnimationFrame(animate);
 
-function handleKeyUp(event) {
-    switch (event.key) {
-        case 'w':
-        case 's':
-            boat.setVelocity(0); // إيقاف حركة القارب
-            break;
-        case 'a':
-        case 'd':
-            boat.setRotationSpeed(0); // إيقاف دوران القارب
-            break;
-    }
-}
+        const now = Date.now();
+        const deltaTime = (now - then) / 1000;
+        then = now;
 
-function onWindowResize() {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-}
+        boat.update(deltaTime);
+        sphere.update(deltaTime);
 
-function animate() {
-    requestAnimationFrame(animate);
-    const deltaTime = clock.getDelta(); // حساب الوقت المنقضي
-    if (boat) boat.update(deltaTime);
-    water.material.uniforms['time'].value += deltaTime; // تحديث حركة الماء
+        boat.checkCollision(sphere);
 
-    // تحديث موقع الكاميرا لمتابعة القارب
-    if (boat && boat.boat) {
-        const offset = new THREE.Vector3(0, 300, 500); // تعيين الإزاحة المناسبة
-        const boatPosition = boat.boat.position.clone();
-        camera.position.copy(boatPosition).add(offset);
-        camera.lookAt(boatPosition);
+        water.material.uniforms['time'].value += 1.0 / 60.0;
+        renderer.render(scene, camera);
+       
+        const { x, y, z } = sphere.object.position;
+        sphereCoordinatesElement.textContent = `Sphere Coordinates: (x: ${x.toFixed(2)}, y: ${y.toFixed(2)}, z: ${z.toFixed(2)})`;
+    
     }
 
-    render();
+    let then = Date.now();
+    animate();
 }
 
-function render() {
-    renderer.render(scene, camera);
-}
-
-init();
-animate();
+window.onload = init;
